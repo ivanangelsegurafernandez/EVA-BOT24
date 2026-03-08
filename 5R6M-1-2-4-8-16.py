@@ -258,6 +258,12 @@ IA_HARD_GUARD_HYSTERESIS_S = 180.0
 IA_HARD_GUARD_LOG_COOLDOWN_S = 45.0
 IA_HARD_GUARD_BOT_MIN_N = 10
 IA_HARD_GUARD_BOT_GAP_PP = 0.18
+# Relajación inteligente en operación LOW_DATA/experimental.
+# Evita bloqueo total (thr=0.99) cuando todavía no hay confiabilidad estadística,
+# pero mantiene prudencia elevando el umbral de forma gradual.
+IA_LOW_CONF_BASE_PENALTY = 0.03
+IA_LOW_CONF_PENALTY_STEP = 0.02
+IA_LOW_CONF_MAX_THR = 0.82
 # Impulso por racha reciente (micro-ajuste dinámico para evitar Prob IA plana).
 IA_RACHA_BOOST_ENABLE = True
 IA_RACHA_BOOST_WINDOW = 8
@@ -8585,9 +8591,10 @@ def get_umbral_operativo(meta: dict | None = None) -> float:
     """
     Umbral único de operación IA (HUD, audio, selección).
 
-    Regla dura:
-    - Si el modelo NO es confiable, si el AUC es bajo, o si hay pocos samples,
-      se bloquea cualquier señal (umbral ~ imposible).
+    Política:
+    - Modelo maduro/confiable: usa umbral dinámico normal.
+    - LOW_DATA/experimental: NO bloquea al 99%; aplica penalización gradual
+      para mantener operación prudente sin congelar el sistema.
     """
     base_thr = get_threshold_sugerido(IA_METRIC_THRESHOLD)
     if base_thr < IA_METRIC_THRESHOLD:
@@ -8627,12 +8634,23 @@ def get_umbral_operativo(meta: dict | None = None) -> float:
     except Exception:
         pass
 
-    # 🔒 BLOQUEO DE SEÑALES CUANDO ES EXPERIMENTAL / BAJO DATOS
-    MIN_AUC_GREEN = 0.55  # “al menos no somos un dado”
-    if (not reliable) or (n_samples < MIN_FIT_ROWS_PROD) or (auc < MIN_AUC_GREEN):
-        return 0.99
+    # LOW_DATA / experimental: penalización gradual en vez de bloqueo 0.99.
+    # Así evitamos el ciclo de "nunca abre señal -> nunca audita cierres".
+    MIN_AUC_GREEN = 0.55
+    try:
+        if (not reliable) or (n_samples < MIN_FIT_ROWS_PROD) or (auc < MIN_AUC_GREEN):
+            penalty = float(IA_LOW_CONF_BASE_PENALTY)
+            if n_samples < int(MIN_FIT_ROWS_PROD):
+                penalty += float(IA_LOW_CONF_PENALTY_STEP)
+            if auc < float(MIN_AUC_GREEN):
+                penalty += float(IA_LOW_CONF_PENALTY_STEP)
 
-    return thr
+            low_data_thr = max(float(base_thr), float(thr)) + float(penalty)
+            return float(min(float(IA_LOW_CONF_MAX_THR), low_data_thr))
+    except Exception:
+        pass
+
+    return float(thr)
 # =========================================================
 # DISPARADOR ÚNICO DE ALERTA IA (AUDIO + FLAG)
 # Regla dura pedida:
